@@ -2,6 +2,7 @@ use crate::{log, ChannelPair, Packet};
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use serenity::all::{ButtonStyle, ChannelId, ComponentInteraction, Context, CreateButton, CreateChannel, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditChannel, EventHandler, GatewayIntents, GuildId, Http, Interaction, Member, Message, PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId, User, UserId};
 use serenity::{async_trait, Client};
 use std::fs::File;
@@ -60,25 +61,8 @@ impl Handler {
                             .color(SECONDARY_COLOR)
                     )).await;
 
-                    let channels = msg.guild_id.unwrap().channels(&ctx.http).await?;
-                    let channel = channels.get(&ChannelId::new(self.config.member_channel_id)).unwrap();
                     let discord_id = msg.author.id.get();
-                    let message = channel.send_message(&ctx.http,
-                                                       CreateMessage::new()
-                                                           .embed(
-                                                               CreateEmbed::new()
-                                                                   .thumbnail(format!("https://www.mc-heads.net/head/{uuid}.png"))
-                                                                   .title("CloverCraft SMP")
-                                                                   .field("Minecraft Name", &name, true)
-                                                                   .field("Minecraft UUID", &uuid, true)
-                                                                   .field("", "", true)
-                                                                   .field("Discord User", format!("<@{discord_id}>"), true)
-                                                                   .field("Discord ID", format!("{discord_id}"), true)
-                                                                   .field("", "", true)
-                                                                   .color(PRIMARY_COLOR)
-                                                           )
-                                                           .button(CreateButton::new(format!("approve-account-{discord_id}-{uuid}")).label("Approve")),
-                    ).await?;
+                    let message = self.add_user_verify(&ctx.http, &name, &uuid, discord_id).await?;
                     local_pair.sender.send(Packet::LinkVerifyMessage(message.id.get()))?;
                 }
 
@@ -137,6 +121,69 @@ impl Handler {
         Ok(())
     }
 
+    async fn handle_member_message(&self, ctx: Context, msg: Message) -> Result<()> {
+        if msg.author.has_role(&ctx.http, self.config.guild_id, self.config.moderator_role_id).await? {
+            let regex = Regex::new(r"^!link ([a-zA-Z0-9_]+) <@([0-9]+)>$")?;
+            if let Some(captures) = regex.captures(&msg.content) {
+                let username = captures[1].to_owned();
+                let discord_id = u64::from_str(&captures[2])?;
+                let guild_id = GuildId::new(self.config.guild_id);
+                if guild_id.member(&ctx.http, discord_id).await.is_ok() && let Ok(uuid) = self.get_uuid(&username).await {
+                    let mut pair = ChannelPair::new();
+                    self.sender.send(pair.entangle())?;
+                    pair.sender.send(Packet::UserQuery(uuid.clone(), discord_id))?;
+
+                    let Some(Packet::UserResponse(success)) = pair.receiver.recv().await else { return Err(anyhow!("Main thread did not respond with user response!")) };
+                    if success {
+                        let message = self.add_user_verify(&ctx.http, &username, &uuid, discord_id).await?;
+                        pair.sender.send(Packet::AddUserManually(username, uuid, discord_id, message.id.get()))?;
+                    }
+                }
+            }
+        }
+
+        // Delete non-bot messages.
+        if !msg.author.bot {
+            msg.delete(&ctx.http).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn add_user_verify(&self, http: &Arc<Http>, name: &str, uuid: &str, discord_id: u64) -> Result<Message> {
+        Ok(ChannelId::new(self.config.member_channel_id).send_message(http,
+                                                                      CreateMessage::new()
+                                                                          .embed(
+                                                                              CreateEmbed::new()
+                                                                                  .thumbnail(format!("https://www.mc-heads.net/head/{uuid}.png"))
+                                                                                  .title("CloverCraft SMP")
+                                                                                  .field("Minecraft Name", name, true)
+                                                                                  .field("Minecraft UUID", uuid, true)
+                                                                                  .field("", "", true)
+                                                                                  .field("Discord User", format!("<@{discord_id}>"), true)
+                                                                                  .field("Discord ID", format!("{discord_id}"), true)
+                                                                                  .field("", "", true)
+                                                                                  .color(PRIMARY_COLOR)
+                                                                          )
+                                                                          .button(CreateButton::new(format!("approve-account-{discord_id}-{uuid}")).label("Approve")),
+        ).await?)
+    }
+
+    async fn get_uuid(&self, name: &str) -> Result<String> {
+        let response = reqwest::get(format!("https://api.minecraftservices.com/minecraft/profile/lookup/name/{name}")).await?;
+        if response.status().as_u16() == 200 {
+            let data: Value = serde_json::from_str(&response.text().await?)?;
+            let id = data["id"].as_str().ok_or(anyhow!("ID wasn't a string!"))?.to_owned();
+            let regex = Regex::new(r"^[0-9a-f]{32}$")?;
+            if !regex.is_match(&id) {
+                return Err(anyhow!("Invalid data returned from the API!"));
+            }
+            Ok(format!("{}-{}-{}-{}-{}", &id[0..8], &id[8..12], &id[12..16], &id[16..20], &id[20..32]))
+        } else {
+            Err(anyhow!("Invalid Minecraft account!"))
+        }
+    }
+
     async fn open_ticket(&self, http: &Arc<Http>, user: &User, component: &ComponentInteraction) -> Result<()> {
         // Create the new ticket channel and give the creator permission to see it.
         let ticket_channel = GuildId::new(self.config.guild_id).create_channel(http, CreateChannel::new(format!("ticket-{}", user.name)).category(self.config.active_ticket_category_id)).await?;
@@ -187,6 +234,11 @@ impl Handler {
     }
 
     async fn approve_account(&self, http: &Arc<Http>, id: &str, component: &ComponentInteraction) -> Result<()> {
+        if !component.user.has_role(http, self.config.guild_id, self.config.moderator_role_id).await? {
+            component.create_response(http, CreateInteractionResponse::Acknowledge).await?;
+            return Ok(());
+        }
+
         let regex = Regex::new(r"^approve-account-([0-9]+)-([0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12})$")?;
         let captures = regex.captures(id).ok_or(anyhow!("Invalid button id!"))?;
         let discord_id = UserId::new(u64::from_str(&captures[1])?);
@@ -254,15 +306,20 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         let verification_channel = self.config.verification_channel_id;
         let ticket_channel = self.config.ticket_channel_id;
+        let member_channel = self.config.member_channel_id;
         let channel_id = msg.channel_id.get();
 
-        if verification_channel == channel_id {
+        if channel_id == verification_channel {
             if let Err(why) = self.handle_verify_message(ctx, msg).await {
                 log!("Error handling verification message: {why:?}");
             }
-        } else if ticket_channel == channel_id {
+        } else if channel_id == ticket_channel {
             if let Err(why) = self.handle_ticket_message(ctx, msg).await {
-                log!("Error handling verification message: {why:?}");
+                log!("Error handling ticket message: {why:?}");
+            }
+        } else if channel_id == member_channel {
+            if let Err(why) = self.handle_member_message(ctx, msg).await {
+                log!("Error handling member message: {why:?}");
             }
         }
     }

@@ -192,6 +192,16 @@ async fn main() -> Result<()> {
                     dirty = true;
                 }
 
+                Packet::UserQuery(uuid, id) => {
+                    let success = !user_states.iter().any(|state| state.uuid == uuid || state.discord_id == Some(id));
+                    channel.sender.send(Packet::UserResponse(success))?;
+                    if success {
+                        let Some(Packet::AddUserManually(name, uuid, discord_id, message_id)) = channel.receiver.recv().await else { return Err(anyhow!("Thread did not reply to add user manually!")) };
+                        user_states.push(UserState::complete(&name, &uuid, discord_id, message_id));
+                        dirty = true;
+                    }
+                }
+
                 x => return Err(anyhow!("Unexpected packet {x:?} received in main loop!")),
             }
         }
@@ -258,10 +268,10 @@ struct UserState {
 }
 
 impl UserState {
-    fn new(name: &String, uuid: &String, code: i32) -> Self {
+    fn new(name: &str, uuid: &str, code: i32) -> Self {
         Self {
-            name: name.clone(),
-            uuid: uuid.clone(),
+            name: name.to_owned(),
+            uuid: uuid.to_owned(),
             discord_id: None,
             verify_state: VerifyState::NEW,
             verify_message: None,
@@ -273,6 +283,18 @@ impl UserState {
                     .as_millis()
                     + (1000 * 30),
             ),
+        }
+    }
+
+    fn complete(name: &str, uuid: &str, discord_id: u64, message_id: u64) -> Self {
+        Self {
+            name: name.to_string(),
+            uuid: uuid.to_string(),
+            discord_id: Some(discord_id),
+            verify_state: VerifyState::PENDING,
+            verify_message: Some(message_id),
+            verify_code: None,
+            code_expires: None,
         }
     }
 }
@@ -298,4 +320,7 @@ enum Packet {
     RemoveMessage(u64),
     ApprovalSuccess,
     ApprovalFailure,
+    AddUserManually(String, String, u64, u64),
+    UserQuery(String, u64),
+    UserResponse(bool),
 }
