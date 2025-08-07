@@ -1,16 +1,12 @@
 extern crate core;
 
-mod tcp;
 mod discord;
+mod tcp;
 
 use anyhow::{anyhow, Result};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serenity::all::{ButtonStyle, ChannelId, CreateButton, CreateEmbed, CreateMessage, GatewayIntents, GuildId, Http, MessageId, MessagePagination, RoleId};
-use serenity::Client;
 use std::fs::File;
-use std::str::FromStr;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -57,7 +53,11 @@ async fn main() -> Result<()> {
 
     loop {
         if let Ok(mut channel) = main_rx.try_recv() {
-            let packet = channel.receiver.recv().await.ok_or(anyhow!("Main packet channel closed!"))?;
+            let packet = channel
+                .receiver
+                .recv()
+                .await
+                .ok_or(anyhow!("Main packet channel closed!"))?;
 
             match packet {
                 Packet::ConnectQuery(name, uuid) => {
@@ -66,7 +66,10 @@ async fn main() -> Result<()> {
                         let mut code;
                         loop {
                             code = random.random_range(100000..1000000);
-                            if !user_states.iter().any(|state| state.verify_code == Some(code)) {
+                            if !user_states
+                                .iter()
+                                .any(|state| state.verify_code == Some(code))
+                            {
                                 break;
                             }
                         }
@@ -78,7 +81,9 @@ async fn main() -> Result<()> {
                     match state.verify_state {
                         VerifyState::NEW => {
                             let code = state.verify_code.unwrap();
-                            let response = format!("Please type the following code into the #verification channel:\n{code}");
+                            let response = format!(
+                                "Please type the following code into the #verification channel:\n{code}"
+                            );
                             log!("Disconnecting user {name} [{uuid}]: {response}");
                             channel.sender.send(Packet::ConnectResponse(response))?;
                         }
@@ -91,30 +96,52 @@ async fn main() -> Result<()> {
 
                         VerifyState::APPROVED => {
                             log!("User {name} [{uuid}] is verified.");
-                            channel.sender.send(Packet::ConnectResponse(String::new()))?;
+                            channel
+                                .sender
+                                .send(Packet::ConnectResponse(String::new()))?;
                         }
                     }
                 }
 
                 Packet::DiscordCode(code, user) => {
                     // Prevent duplicate registrations per discord user
-                    if user_states.iter().any(|state| state.discord_id == Some(user)) {
+                    if user_states
+                        .iter()
+                        .any(|state| state.discord_id == Some(user))
+                    {
                         channel.sender.send(Packet::AlreadyLinked)?;
                         continue;
                     }
 
                     // If we found a matching code, send the info back, otherwise send an error.
-                    match user_states.iter_mut().find(|state| state.verify_code == Some(code) && state.verify_state == VerifyState::NEW) {
+                    match user_states.iter_mut().find(|state| {
+                        state.verify_code == Some(code) && state.verify_state == VerifyState::NEW
+                    }) {
                         Some(state) => {
-                            log!("User {} [{}] is linking to discord account with ID {user}", state.name, state.uuid);
+                            log!(
+                                "User {} [{}] is linking to discord account with ID {user}",
+                                state.name,
+                                state.uuid
+                            );
                             state.discord_id = Some(user);
                             state.verify_state = VerifyState::PENDING;
                             state.verify_code = None;
                             state.code_expires = None;
-                            channel.sender.send(Packet::VerifyPending(state.uuid.to_owned(), state.name.to_owned()))?;
+                            channel.sender.send(Packet::VerifyPending(
+                                state.uuid.to_owned(),
+                                state.name.to_owned(),
+                            ))?;
 
                             // Read verification message ID that got created
-                            let Packet::LinkVerifyMessage(message_id) = channel.receiver.recv().await.ok_or(anyhow!("Thread did not send linked verify message id!"))? else { return Err(anyhow!("Unexpected packet received instead of linked verify message id!")) };
+                            let Packet::LinkVerifyMessage(message_id) =
+                                channel.receiver.recv().await.ok_or(anyhow!(
+                                    "Thread did not send linked verify message id!"
+                                ))?
+                            else {
+                                return Err(anyhow!(
+                                    "Unexpected packet received instead of linked verify message id!"
+                                ));
+                            };
                             state.verify_message = Some(message_id);
 
                             dirty = true;
@@ -129,7 +156,12 @@ async fn main() -> Result<()> {
                 // Set state to approved.
                 Packet::DiscordApproval(uuid) => {
                     if let Some(state) = user_states.iter_mut().find(|state| state.uuid == uuid) {
-                        log!("Successfully linked user {} [{}] to discord account with ID {}", state.name, state.uuid, state.discord_id.unwrap());
+                        log!(
+                            "Successfully linked user {} [{}] to discord account with ID {}",
+                            state.name,
+                            state.uuid,
+                            state.discord_id.unwrap()
+                        );
                         channel.sender.send(Packet::ApprovalSuccess)?;
                         state.verify_state = VerifyState::APPROVED;
                         dirty = true;
@@ -140,28 +172,53 @@ async fn main() -> Result<()> {
 
                 // Remove the verification message
                 Packet::RemoveUser(id) => {
-                    if let Some(state) = user_states.iter().filter(|state| state.discord_id == Some(id)).next() {
-                        log!("Unlinking user {} [{}] from discord account with ID {}", state.name, state.uuid, state.discord_id.unwrap());
-                        channel.sender.send(Packet::RemoveMessage(state.verify_message.unwrap()))?;
+                    if let Some(state) = user_states
+                        .iter()
+                        .filter(|state| state.discord_id == Some(id))
+                        .next()
+                    {
+                        log!(
+                            "Unlinking user {} [{}] from discord account with ID {}",
+                            state.name,
+                            state.uuid,
+                            state.discord_id.unwrap()
+                        );
+                        channel
+                            .sender
+                            .send(Packet::RemoveMessage(state.verify_message.unwrap()))?;
                     }
 
                     user_states.retain(|state| state.discord_id != Some(id));
                     dirty = true;
                 }
 
-                x => return Err(anyhow!("Unexpected packet {x:?} received in main loop!"))
+                x => return Err(anyhow!("Unexpected packet {x:?} received in main loop!")),
             }
         }
 
         // Remove expired codes
-        let time = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis();
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis();
         user_states.retain(|state| state.code_expires.is_none_or(|expired| expired > time));
 
         // Update the config file
         if dirty {
             let _ = std::fs::remove_file(USERS_FILE);
             let mut file = File::create_new(USERS_FILE)?;
-            serde_json::to_writer_pretty(&mut file, &user_states.iter().filter(|state| matches!(state.verify_state, VerifyState::PENDING | VerifyState::APPROVED)).collect::<Vec<&UserState>>())?;
+            serde_json::to_writer_pretty(
+                &mut file,
+                &user_states
+                    .iter()
+                    .filter(|state| {
+                        matches!(
+                            state.verify_state,
+                            VerifyState::PENDING | VerifyState::APPROVED
+                        )
+                    })
+                    .collect::<Vec<&UserState>>(),
+            )?;
             dirty = false;
         }
     }
@@ -175,10 +232,7 @@ struct ChannelPair<T> {
 impl<T> ChannelPair<T> {
     fn new() -> Self {
         let (sender, receiver) = unbounded_channel();
-        Self {
-            sender,
-            receiver,
-        }
+        Self { sender, receiver }
     }
 
     // Generate an entangled partner that can be sent over a channel.
@@ -212,7 +266,13 @@ impl UserState {
             verify_state: VerifyState::NEW,
             verify_message: None,
             verify_code: Some(code),
-            code_expires: Some(SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() + (1000 * 30)),
+            code_expires: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis()
+                    + (1000 * 30),
+            ),
         }
     }
 }
