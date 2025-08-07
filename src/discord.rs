@@ -31,7 +31,7 @@ impl Handler {
 
     async fn handle_verify_message(&self, ctx: Context, msg: Message) -> Result<()> {
         // Create a new message when told.
-        if msg.content == "!msg" && msg.author.has_role(&ctx.http, self.config.guild_id, self.config.moderator_role_id).await? {
+        if msg.content == "!msg" && msg.author.has_role(&ctx.http, self.config.guild_id, self.config.staff_role_id).await? {
             msg.channel_id.send_message(&ctx.http, CreateMessage::new()
                 .embed(CreateEmbed::new()
                     .title("CloverCraft SMP")
@@ -100,7 +100,7 @@ impl Handler {
 
     async fn handle_ticket_message(&self, ctx: Context, msg: Message) -> Result<()> {
         // Create a new message when told.
-        if msg.content == "!msg" && msg.author.has_role(&ctx.http, self.config.guild_id, self.config.moderator_role_id).await? {
+        if msg.content == "!msg" && msg.author.has_role(&ctx.http, self.config.guild_id, self.config.staff_role_id).await? {
             msg.channel_id.send_message(&ctx.http, CreateMessage::new()
                 .embed(CreateEmbed::new()
                     .title("CloverCraft Tickets")
@@ -122,22 +122,20 @@ impl Handler {
     }
 
     async fn handle_member_message(&self, ctx: Context, msg: Message) -> Result<()> {
-        if msg.author.has_role(&ctx.http, self.config.guild_id, self.config.moderator_role_id).await? {
-            let regex = Regex::new(r"^!link ([a-zA-Z0-9_]+) <@([0-9]+)>$")?;
-            if let Some(captures) = regex.captures(&msg.content) {
-                let username = captures[1].to_owned();
-                let discord_id = u64::from_str(&captures[2])?;
-                let guild_id = GuildId::new(self.config.guild_id);
-                if guild_id.member(&ctx.http, discord_id).await.is_ok() && let Ok(uuid) = self.get_uuid(&username).await {
-                    let mut pair = ChannelPair::new();
-                    self.sender.send(pair.entangle())?;
-                    pair.sender.send(Packet::UserQuery(uuid.clone(), discord_id))?;
+        let regex = Regex::new(r"^!link ([a-zA-Z0-9_]+) <@([0-9]+)>$")?;
+        if let Some(captures) = regex.captures(&msg.content) {
+            let username = captures[1].to_owned();
+            let discord_id = u64::from_str(&captures[2])?;
+            let guild_id = GuildId::new(self.config.guild_id);
+            if guild_id.member(&ctx.http, discord_id).await.is_ok() && let Ok(uuid) = self.get_uuid(&username).await {
+                let mut pair = ChannelPair::new();
+                self.sender.send(pair.entangle())?;
+                pair.sender.send(Packet::UserQuery(uuid.clone(), discord_id))?;
 
-                    let Some(Packet::UserResponse(success)) = pair.receiver.recv().await else { return Err(anyhow!("Main thread did not respond with user response!")) };
-                    if success {
-                        let message = self.add_user_verify(&ctx.http, &username, &uuid, discord_id).await?;
-                        pair.sender.send(Packet::AddUserManually(username, uuid, discord_id, message.id.get()))?;
-                    }
+                let Some(Packet::UserResponse(success)) = pair.receiver.recv().await else { return Err(anyhow!("Main thread did not respond with user response!")) };
+                if success {
+                    let message = self.add_user_verify(&ctx.http, &username, &uuid, discord_id).await?;
+                    pair.sender.send(Packet::AddUserManually(username, uuid, discord_id, message.id.get()))?;
                 }
             }
         }
@@ -196,7 +194,7 @@ impl Handler {
         // Create the initial message / close ticket button
         let initial_message = CreateMessage::new()
             .content(
-                format!("<@{}> <@&{}>", user.id, self.config.moderator_role_id)
+                format!("<@{}> <@&{}>", user.id, self.config.staff_role_id)
             )
             .embed(
                 CreateEmbed::new()
@@ -234,11 +232,6 @@ impl Handler {
     }
 
     async fn approve_account(&self, http: &Arc<Http>, id: &str, component: &ComponentInteraction) -> Result<()> {
-        if !component.user.has_role(http, self.config.guild_id, self.config.moderator_role_id).await? {
-            component.create_response(http, CreateInteractionResponse::Acknowledge).await?;
-            return Ok(());
-        }
-
         let regex = Regex::new(r"^approve-account-([0-9]+)-([0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12})$")?;
         let captures = regex.captures(id).ok_or(anyhow!("Invalid button id!"))?;
         let discord_id = UserId::new(u64::from_str(&captures[1])?);
@@ -373,7 +366,7 @@ struct DiscordConfig {
     token: String,
     guild_id: u64,
     verified_role_id: u64,
-    moderator_role_id: u64,
+    staff_role_id: u64,
     verification_channel_id: u64,
     member_channel_id: u64,
     ticket_channel_id: u64,
@@ -387,7 +380,7 @@ impl DiscordConfig {
             token: String::new(),
             guild_id: 0,
             verified_role_id: 0,
-            moderator_role_id: 0,
+            staff_role_id: 0,
             verification_channel_id: 0,
             member_channel_id: 0,
             ticket_channel_id: 0,
