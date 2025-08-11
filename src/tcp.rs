@@ -36,7 +36,7 @@ macro_rules! impl_put {
 }
 
 pub async fn start_tcp(tx: UnboundedSender<ChannelPair<Packet>>) -> Result<()> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{TCP_PORT}")).await?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{TCP_PORT}")).await?;
     log!("Successfully started tcp listener on port {TCP_PORT}");
     loop {
         let (stream, _) = listener.accept().await?;
@@ -147,4 +147,5 @@ impl Buffer {
         self.write_cursor += len;
         Ok(())
     }
+
 }
